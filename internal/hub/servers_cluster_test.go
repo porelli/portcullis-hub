@@ -602,10 +602,14 @@ func TestRevokeParkedIsAccepted(t *testing.T) {
 		if err != nil || parked != refusal.Text {
 			t.Fatalf("%d: %q %v", refusal.Status, parked, err)
 		}
-		// Removed before nodeadm is asked (recorded first, Task 33b VM run
-		// 15) and again after its answer (idempotent).
-		if !slices.Equal(meshGone, []string{"n3", "n3"}) {
-			t.Errorf("mesh peer removed %v", meshGone)
+		// Out only past the token apply (ruling A after VM run 16): a
+		// quorum park is (after the apply), a background op isn't yet.
+		want := []string{"n3"}
+		if refusal.Status == 503 {
+			want = nil
+		}
+		if !slices.Equal(meshGone, want) {
+			t.Errorf("%d: mesh peer removed %v, want %v", refusal.Status, meshGone, want)
 		}
 		if s, ok := cf.serverEntry("n3"); !ok || s.State != ServerRevoked {
 			t.Errorf("entry %+v %v", s, ok)
@@ -1039,11 +1043,19 @@ func TestRevokeRecordedBeforeNodeadm(t *testing.T) {
 	if _, _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n3", nodeadm.Revoke); err != nil {
 		t.Fatal(err)
 	}
-	if at.State != ServerRevoked || !at.RevokeWatch || at.RevokeConfirmed || !meshOut {
-		t.Fatalf("when nodeadm was asked: entry %+v, mesh peer out %v; want revoked, watched, unconfirmed, the peer out", at, meshOut)
+	// The peer stays until nodeadm is past the token apply (ruling A after
+	// VM run 16): out only after its answer.
+	if at.State != ServerRevoked || !at.RevokeWatch || at.RevokeConfirmed || meshOut {
+		t.Fatalf("when nodeadm was asked: entry %+v, mesh peer out %v; want revoked, watched, unconfirmed, the peer still in", at, meshOut)
 	}
 	if s, _ := cf.h.serverEntry("n3"); !s.RevokeConfirmed {
 		t.Fatalf("not confirmed after nodeadm's answer: %+v", s)
+	}
+	cf.h.mu.RLock()
+	meshOut = cf.h.st.Mesh["n3"].Removed
+	cf.h.mu.RUnlock()
+	if !meshOut {
+		t.Fatal("the mesh peer isn't out after nodeadm's answer")
 	}
 }
 
@@ -1092,12 +1104,13 @@ func TestRevokeFinishedAfterHubDied(t *testing.T) {
 	if !ok || s.State != ServerRevoked || !s.RevokeWatch || s.RevokeConfirmed {
 		t.Fatalf("after the failed call: %+v %v; want revoked, watched, unconfirmed", s, ok)
 	}
-	// The peer's removal lost with the Hub.
-	cf.h.mu.Lock()
-	r := cf.h.st.Mesh["n3"]
-	r.Removed = false
-	cf.h.st.Mesh["n3"] = r
-	cf.h.mu.Unlock()
+	// Not past the token apply: the peer is still in (ruling A, VM run 16).
+	cf.h.mu.RLock()
+	early := cf.h.st.Mesh["n3"].Removed
+	cf.h.mu.RUnlock()
+	if early {
+		t.Fatal("the mesh peer went before nodeadm answered")
+	}
 	cf.na.setRefuse("remove:n3:revoke", nil)
 	cf.h.settleClusterNodes(context.Background())
 	if s, _ := cf.h.serverEntry("n3"); !s.RevokeConfirmed || s.State != ServerRevoked {
@@ -1148,5 +1161,44 @@ func TestAllocMeshIPSkipsReserved(t *testing.T) {
 	cf.h.mu.Unlock()
 	if err != nil || got != "10.215.0.3" {
 		t.Fatalf("with nothing reserved: allocated %s (%v), want 10.215.0.3", got, err)
+	}
+}
+
+// TestRevokedKeptInPlansUntilPastApply (ruling A after Task 33b VM run
+// 16): a recorded, unconfirmed revoke keeps the node in the mesh plans
+// while nodeadm's op runs (the apply restarts keep their quorum margin);
+// a background answer still keeps it; past the apply (cutoff_pending) it
+// leaves every plan.
+func TestRevokedKeptInPlansUntilPastApply(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true))
+	cf.h.settleClusterNodes(context.Background())
+	names := func() bool {
+		cf.na.mu.Lock()
+		defer cf.na.mu.Unlock()
+		for id, p := range cf.na.mesh {
+			for _, q := range p.Peers {
+				if q.ID == "n3" && id != "n3" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if !names() {
+		t.Fatal("n3 isn't in the plans to begin with")
+	}
+	cf.na.setRefuse("remove:n3:revoke", &nodeadm.APIError{Status: 503, Text: "the revocation of n3 goes on in the background: retry to see it finish"})
+	if _, _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n3", nodeadm.Revoke); err != nil {
+		t.Fatal(err)
+	}
+	cf.h.settleClusterNodes(context.Background())
+	if !names() {
+		t.Fatal("n3 left the plans while nodeadm's op runs (before the token apply is known done)")
+	}
+	cf.na.setRefuse("remove:n3:revoke", &nodeadm.APIError{Status: 409, Kind: nodeadm.KindCutoffPending, Text: "waiting for n3 to be cut off: still a mesh peer of n1 (its plan)"})
+	cf.h.settleClusterNodes(context.Background())
+	cf.h.settleClusterNodes(context.Background())
+	if names() {
+		t.Fatal("n3 is still in a plan past the token apply")
 	}
 }

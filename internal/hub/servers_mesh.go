@@ -443,7 +443,11 @@ func (h *Hub) meshInputsOf(snap nodeadm.Snapshot) meshInputs {
 			continue
 		}
 		s, listed := h.st.Servers[id]
-		if listed && (!s.ClusterNode() || s.State == ServerRevoked) {
+		// A revoked node leaves the plans once nodeadm is past the token
+		// apply (ruling A after Task 33b VM run 16: until then the revoked
+		// server, an etcd voter, keeps the survivors' restarts a quorum
+		// margin); its mesh record Removed then (meshRemove).
+		if listed && (!s.ClusterNode() || (s.State == ServerRevoked && revokePastApply(s.RevokeConfirmed, s.RevokeParked))) {
 			continue
 		}
 		var mesh, site, pub, lan, public string
