@@ -74,6 +74,13 @@ type Server struct {
 	RevokeConfirmed bool      `json:"revoke_confirmed,omitempty" yaml:"revoke_confirmed,omitempty"`
 	RevokeVoidOnly  bool      `json:"revoke_void_only,omitempty" yaml:"revoke_void_only,omitempty"`
 	NodeGoneSince   time.Time `json:"node_gone_since,omitempty" yaml:"node_gone_since,omitempty"`
+	// RevokeAt: when the Hub recorded the revoke (before asking nodeadm);
+	// RevokeMidApply: nodeadm's last word is that its op runs (the call in
+	// flight, or its 503 "goes on in the background"). Only then, and only
+	// until RevokeAt + RevokeMeshMax, does the node keep its mesh peer
+	// (core Task 33b VM run 16 and its security review).
+	RevokeAt       time.Time `json:"revoke_at,omitempty" yaml:"revoke_at,omitempty"`
+	RevokeMidApply bool      `json:"revoke_mid_apply,omitempty" yaml:"revoke_mid_apply,omitempty"`
 }
 
 // The server kinds.

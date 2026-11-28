@@ -894,7 +894,7 @@ func (h *Hub) RemoveClusterNode(ctx context.Context, actor directory.Actor, id, 
 		// run 16, ruling A: cut before, the revoked server, still an etcd
 		// voter, left the apply restarts without a quorum margin and SNR
 		// fenced a survivor), never on the call's start.
-		h.markRevoked(id, n, revokeMark{})
+		h.markRevoked(id, n, revokeMark{midApply: true, start: true})
 		parked, _, err := h.revokeNode(rctx, api, id, n, meshIP, false)
 		if err != nil {
 			return nil, "", nodeadmErr(err)
@@ -1142,6 +1142,8 @@ type revokeMark struct {
 	parked    string // nodeadm's text of a parked (or background) revocation
 	confirmed bool   // nodeadm answered done (204) or parked with its security steps done
 	void      bool   // only the code was voided (it was never used)
+	midApply  bool   // nodeadm's op runs (the call in flight, or its background answer)
+	start     bool   // the Hub records the revoke now (RevokeAt, if not set)
 }
 
 // revokeNode is nodeadm's revoke of node id (DELETE ?mode=revoke: the
@@ -1156,16 +1158,11 @@ type revokeMark struct {
 func (h *Hub) revokeNode(ctx context.Context, api NodeadmAPI, id string, n *nodeadm.Node, meshIP string, uninstall bool) (parked string, confirmed bool, err error) {
 	parked, confirmed, err = revokeAnswer(api.Remove(ctx, id, nodeadm.Revoke))
 	if err != nil {
+		// No answer that says the op runs (an error, nodeadm unreachable or
+		// timed out): the peer goes at once (security review of ruling A).
+		h.setRevokeMidApply(id, false)
+		h.revokeMeshCut(ctx, id)
 		return "", false, err
-	}
-	// The mesh peer out once nodeadm is past the token apply: done, parked
-	// for quorum (after the apply) or waiting for the cut-off proof (whose
-	// mesh evidence this removal gives); not while its op still runs in the
-	// background (it may be mid-apply: VM run 16).
-	if revokePastApply(confirmed, parked) {
-		if err := h.meshRemovePeer(ctx, id); err != nil {
-			log.Printf("servers: the mesh peer of %s: %v", id, err)
-		}
 	}
 	if uninstall {
 		if ag, err := h.nodeagentAPI(ctx, id, meshIP); err == nil {
@@ -1176,18 +1173,47 @@ func (h *Hub) revokeNode(ctx context.Context, api NodeadmAPI, id string, n *node
 			cancel()
 		}
 	}
-	h.markRevoked(id, n, revokeMark{parked: parked, confirmed: confirmed})
+	midApply := !confirmed && strings.Contains(parked, "goes on in the background")
+	h.markRevoked(id, n, revokeMark{parked: parked, confirmed: confirmed, midApply: midApply})
+	h.revokeMeshCut(ctx, id)
 	return parked, confirmed, nil
 }
 
-// revokePastApply: nodeadm's answer shows its revoke past the token apply
-// (done, or parked after it: quorum_minimum or cutoff_pending), so the
-// mesh peer may go (ruling A after Task 33b VM run 16).
-func revokePastApply(confirmed bool, parked string) bool {
-	if confirmed {
-		return true
+// RevokeMeshMax: how long after the Hub recorded a revoke its node may
+// keep its mesh peer while nodeadm says its op runs (the token apply: a
+// few minutes; core Task 33b VM run 16). Past it the peer goes, whatever
+// nodeadm says.
+const RevokeMeshMax = 10 * time.Minute
+
+// revokeMeshKept: a revoked entry keeps its mesh peer only while nodeadm's
+// last word is that its op runs (the call in flight, or its 503
+// background answer), and never past RevokeAt + RevokeMeshMax. Any other
+// answer (done, parked, cutoff_pending, unknown_node, an error, no
+// answer) and the peer goes (ruling A after VM run 16, bounded by its
+// security review).
+func revokeMeshKept(s state.Server, now time.Time) bool {
+	return s.State == ServerRevoked && s.RevokeMidApply && !s.RevokeAt.IsZero() && now.Sub(s.RevokeAt) < RevokeMeshMax
+}
+
+// revokeMeshCut removes revoked node id's mesh peer unless revokeMeshKept.
+func (h *Hub) revokeMeshCut(ctx context.Context, id string) {
+	s, ok := h.serverEntry(id)
+	if ok && revokeMeshKept(s, h.now().UTC()) {
+		return
 	}
-	return parked != "" && !strings.Contains(parked, "goes on in the background")
+	if err := h.meshRemovePeer(ctx, id); err != nil {
+		log.Printf("servers: the mesh peer of %s: %v (retried at the next tick)", id, err)
+	}
+}
+
+func (h *Hub) setRevokeMidApply(id string, v bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if s, ok := h.st.Servers[id]; ok && s.ClusterNode() && s.RevokeMidApply != v {
+		s.RevokeMidApply = v
+		h.st.Servers[id] = s
+		h.saveLocked()
+	}
 }
 
 // revokeAnswer classifies nodeadm's answer to a revoke.
@@ -1216,7 +1242,10 @@ func (h *Hub) markRevoked(id string, n *nodeadm.Node, m revokeMark) {
 	h.keepClusterNode(id, n, ServerRevoked, m.parked)
 	h.mu.Lock()
 	if s, ok := h.st.Servers[id]; ok && s.ClusterNode() {
-		s.RevokeWatch, s.RevokeConfirmed, s.RevokeVoidOnly = true, m.confirmed, m.void
+		s.RevokeWatch, s.RevokeConfirmed, s.RevokeVoidOnly, s.RevokeMidApply = true, m.confirmed, m.void, m.midApply
+		if m.start && s.RevokeAt.IsZero() {
+			s.RevokeAt = h.now().UTC()
+		}
 		h.st.Servers[id] = s
 		h.saveLocked()
 	}
@@ -1342,7 +1371,7 @@ func (h *Hub) settleRevoked(ctx context.Context, api NodeadmAPI, id string, n *n
 	h.mu.RLock()
 	removed := h.st.Mesh[id].Removed
 	h.mu.RUnlock()
-	if !removed && revokePastApply(s.RevokeConfirmed, s.RevokeParked) {
+	if !removed && !revokeMeshKept(s, h.now().UTC()) {
 		c, cancel := context.WithTimeout(ctx, clusterCallWait)
 		if err := h.meshRemovePeer(c, id); err != nil {
 			log.Printf("servers: the mesh peer of revoked %s: %v (retried at the next tick)", id, err)

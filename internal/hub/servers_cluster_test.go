@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"github.com/portcullis/hub/internal/meshplan"
 	"maps"
 	"os"
 	"path/filepath"
@@ -1104,13 +1105,13 @@ func TestRevokeFinishedAfterHubDied(t *testing.T) {
 	if !ok || s.State != ServerRevoked || !s.RevokeWatch || s.RevokeConfirmed {
 		t.Fatalf("after the failed call: %+v %v; want revoked, watched, unconfirmed", s, ok)
 	}
-	// Not past the token apply: the peer is still in (ruling A, VM run 16).
-	cf.h.mu.RLock()
-	early := cf.h.st.Mesh["n3"].Removed
-	cf.h.mu.RUnlock()
-	if early {
-		t.Fatal("the mesh peer went before nodeadm answered")
-	}
+	// An error is no word that the op runs: the peer goes at once
+	// (security review of ruling A). Lost here with the Hub:
+	cf.h.mu.Lock()
+	r := cf.h.st.Mesh["n3"]
+	r.Removed = false
+	cf.h.st.Mesh["n3"] = r
+	cf.h.mu.Unlock()
 	cf.na.setRefuse("remove:n3:revoke", nil)
 	cf.h.settleClusterNodes(context.Background())
 	if s, _ := cf.h.serverEntry("n3"); !s.RevokeConfirmed || s.State != ServerRevoked {
@@ -1200,5 +1201,176 @@ func TestRevokedKeptInPlansUntilPastApply(t *testing.T) {
 	cf.h.settleClusterNodes(context.Background())
 	if names() {
 		t.Fatal("n3 is still in a plan past the token apply")
+	}
+}
+
+// TestRevokeMeshCutBounded (security review of ruling A): a revoked node
+// keeps its mesh peer only while nodeadm says its op runs (the 503
+// background answer), and never past RevokeAt + RevokeMeshMax; nodeadm
+// unreachable, unknown_node or another error cut it at once. The plans
+// follow the same rule.
+func TestRevokeMeshCutBounded(t *testing.T) {
+	inPlans := func(cf *clusterFixture) bool {
+		cf.na.mu.Lock()
+		defer cf.na.mu.Unlock()
+		for id, p := range cf.na.mesh {
+			for _, q := range p.Peers {
+				if q.ID == "n3" && id != "n3" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, c := range []struct {
+		name    string
+		refusal error
+		kept    bool
+	}{
+		{"nodeadm unreachable", errors.New("dial tcp 10.43.0.9:8443: connect: connection refused"), false},
+		{"nodeadm times out", context.DeadlineExceeded, false},
+		{"unknown_node", &nodeadm.APIError{Status: 404, Kind: nodeadm.KindUnknownNode, Text: "unknown node n3"}, false},
+		{"another error", &nodeadm.APIError{Status: 500, Text: "nodeadm couldn't complete the request"}, false},
+		{"mid-apply (background)", &nodeadm.APIError{Status: 503, Text: "the revocation of n3 goes on in the background: retry to see it finish"}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true))
+			clock := &offsetClock{}
+			cf.h.srvT.now = clock.now
+			cf.h.settleClusterNodes(context.Background())
+			cf.na.setRefuse("remove:n3:revoke", c.refusal)
+			cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n3", nodeadm.Revoke)
+			cf.h.mu.RLock()
+			out := cf.h.st.Mesh["n3"].Removed
+			s := cf.h.st.Servers["n3"]
+			cf.h.mu.RUnlock()
+			if s.RevokeAt.IsZero() || s.State != ServerRevoked {
+				t.Fatalf("not recorded first with RevokeAt: %+v", s)
+			}
+			if out == c.kept {
+				t.Fatalf("mesh peer removed %v, want kept %v", out, c.kept)
+			}
+			cf.h.settleClusterNodes(context.Background())
+			if got := inPlans(cf); got != c.kept {
+				t.Fatalf("in the plans %v, want %v", got, c.kept)
+			}
+			if !c.kept {
+				return
+			}
+			// Still mid-apply, but past the deadline: out, whatever nodeadm says.
+			clock.mu.Lock()
+			clock.off = RevokeMeshMax + time.Second
+			clock.mu.Unlock()
+			cf.h.settleClusterNodes(context.Background())
+			cf.h.mu.RLock()
+			out = cf.h.st.Mesh["n3"].Removed
+			cf.h.mu.RUnlock()
+			if !out || inPlans(cf) {
+				t.Fatalf("past RevokeAt + RevokeMeshMax: peer removed %v, in plans %v", out, inPlans(cf))
+			}
+		})
+	}
+}
+
+// TestRevokeMeshKeptRule: the rule itself, at the edges.
+func TestRevokeMeshKeptRule(t *testing.T) {
+	at := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	base := state.Server{Kind: state.KindClusterNode, State: ServerRevoked, RevokeAt: at, RevokeMidApply: true}
+	for _, c := range []struct {
+		name string
+		mod  func(s *state.Server)
+		now  time.Time
+		want bool
+	}{
+		{"mid-apply, in time", func(*state.Server) {}, at.Add(RevokeMeshMax - time.Second), true},
+		{"mid-apply, at the deadline", func(*state.Server) {}, at.Add(RevokeMeshMax), false},
+		{"not mid-apply", func(s *state.Server) { s.RevokeMidApply = false }, at.Add(time.Second), false},
+		{"no RevokeAt", func(s *state.Server) { s.RevokeAt = time.Time{} }, at.Add(time.Second), false},
+		{"not revoked", func(s *state.Server) { s.State = ServerReady }, at.Add(time.Second), false},
+	} {
+		s := base
+		c.mod(&s)
+		if got := revokeMeshKept(s, c.now); got != c.want {
+			t.Errorf("%s: kept %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestRevokeMeshPlanRule: meshInputsOf applies revokeMeshKept itself, its
+// mesh record not yet Removed (a Hub restarted with the removal lost): a
+// revoked node mid-apply in time is planned; not mid-apply, or past the
+// deadline, it isn't.
+func TestRevokeMeshPlanRule(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true))
+	clock := &offsetClock{}
+	cf.h.srvT.now = clock.now
+	cf.h.settleClusterNodes(context.Background())
+	snap, err := cf.na.Cluster(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned := func() bool {
+		in := cf.h.meshInputsOf(snap)
+		for _, n := range append(append([]meshplan.Node{}, in.established...), in.joining...) {
+			if n.ID == "n3" {
+				return true
+			}
+		}
+		return false
+	}
+	set := func(mid bool, at time.Time) {
+		cf.h.mu.Lock()
+		if cf.h.st.Servers == nil {
+			cf.h.st.Servers = map[string]state.Server{}
+		}
+		s := cf.h.st.Servers["n3"]
+		s.Kind, s.State, s.RevokeMidApply, s.RevokeAt = state.KindClusterNode, ServerRevoked, mid, at
+		s.MeshIP = "10.215.0.3"
+		cf.h.st.Servers["n3"] = s
+		if cf.h.st.Mesh != nil {
+			m := cf.h.st.Mesh["n3"]
+			m.Removed = false
+			cf.h.st.Mesh["n3"] = m
+		}
+		cf.h.mu.Unlock()
+	}
+	set(true, clock.now())
+	if !planned() {
+		t.Error("mid-apply in time: left out of the plan")
+	}
+	set(false, clock.now())
+	if planned() {
+		t.Error("not mid-apply: still planned")
+	}
+	set(true, clock.now().Add(-RevokeMeshMax-time.Second))
+	if planned() {
+		t.Error("mid-apply past the deadline: still planned")
+	}
+}
+
+// TestRevokeMeshCutEveryPass: a confirmed revoke whose mesh removal was
+// lost (a Hub that died) gets it on the next pass, nodeadm not asked again.
+func TestRevokeMeshCutEveryPass(t *testing.T) {
+	cf := newClusterFixture(t, serverNode("n1", "10.215.0.1", true), serverNode("n2", "10.215.0.2", true), serverNode("n3", "10.215.0.3", true))
+	if _, _, err := cf.h.RemoveClusterNode(context.Background(), admin, "n3", "n3", nodeadm.Revoke); err != nil {
+		t.Fatal(err)
+	}
+	cf.na.mu.Lock()
+	cf.na.snap.Nodes = cf.na.snap.Nodes[:2] // its Node gone
+	cf.na.calls = nil
+	cf.na.mu.Unlock()
+	cf.h.mu.Lock()
+	m := cf.h.st.Mesh["n3"]
+	m.Removed = false
+	cf.h.st.Mesh["n3"] = m
+	cf.h.mu.Unlock()
+	var gone []string
+	cf.h.cl.meshRemove = func(_ context.Context, id string) error { gone = append(gone, id); return nil }
+	cf.h.settleClusterNodes(context.Background())
+	if !slices.Equal(gone, []string{"n3"}) {
+		t.Fatalf("mesh removals %v: the lost removal of a confirmed revoke wasn't redone", gone)
+	}
+	if slices.Contains(cf.na.Calls(), "remove:n3:revoke") {
+		t.Error("nodeadm asked again for a confirmed revoke")
 	}
 }
