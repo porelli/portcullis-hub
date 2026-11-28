@@ -390,6 +390,30 @@ func TestHealthPeerStatus(t *testing.T) {
 		h.Peers["n3"].LatestHandshake.Valid || h.Peers["n3"].Endpoint.Valid {
 		t.Errorf("peers %+v", h.Peers)
 	}
+	// device_peers (core Task 33b security review): every device peer by
+	// key, the one the plan doesn't name too, with its handshake and
+	// allowed IPs.
+	dp := h.DevicePeers.V
+	if !h.DevicePeers.Valid || len(dp) != 3 || dp[k1].LatestHandshake.V != "2026-11-20T10:00:05Z" ||
+		!slices.Equal(dp[k1].AllowedIPs, []string{"10.215.0.1/32"}) || dp[k3].LatestHandshake.Valid {
+		t.Errorf("device peers %+v", h.DevicePeers)
+	}
+	if !strings.Contains(body, `"device_peers":{`) {
+		t.Errorf("device_peers isn't an object: %s", body)
+	}
+}
+
+// TestHealthDevicePeersNullWhenUnreadable: a device that can't be read
+// answers device_peers null (never {}: "no peers" would read as cut off).
+func TestHealthDevicePeersNullWhenUnreadable(t *testing.T) {
+	r := newRig(t, "agent")
+	r.wg.mu.Lock()
+	r.wg.exists = false
+	r.wg.mu.Unlock()
+	code, body := do(t, r.client(r.ca, na.CNHub), "GET", r.server().URL+"/v1/health", "")
+	if code != 200 || !strings.Contains(body, `"device_peers":null`) {
+		t.Fatalf("%d %s", code, body)
+	}
 }
 
 func mustKey(t *testing.T, s string) wgtypes.Key {

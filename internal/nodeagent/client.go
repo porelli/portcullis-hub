@@ -42,6 +42,20 @@ type Health struct {
 	// uses for it (null: none). The Hub confirms a public endpoint as
 	// reachable from it (contract §20.11).
 	Peers map[string]PeerStatus `json:"peers"`
+	// DevicePeers is pcmesh's actual WireGuard peers (by public key, plan
+	// or not): each one's latest handshake, endpoint and allowed IPs; null
+	// when the device can't be read. nodeadm requires it (core Task 33b
+	// security review): a revoked server counts as cut off only when no
+	// survivor's device holds a peer for its mesh address, and none saw a
+	// handshake since the revoke from a key that isn't a surviving node's.
+	DevicePeers jsonstrict.Nullable[map[string]DevicePeer] `json:"device_peers"`
+}
+
+// DevicePeer is one WireGuard peer of pcmesh as the device has it.
+type DevicePeer struct {
+	LatestHandshake jsonstrict.Nullable[string] `json:"latest_handshake"`
+	Endpoint        jsonstrict.Nullable[string] `json:"endpoint"`
+	AllowedIPs      []string                    `json:"allowed_ips"`
 }
 
 // PeerStatus is one peer's state in GET /v1/health.

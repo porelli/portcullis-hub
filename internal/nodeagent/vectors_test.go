@@ -130,3 +130,36 @@ func TestJoinFlagsVectorsCopy(t *testing.T) {
 		t.Error("testdata/join_flags_vectors.json differs from core's nodeadm/testdata/join_flags_vectors.json: copy it byte for byte")
 	}
 }
+
+// TestHealthAnswerVectors (core Task 33b security review): the shared
+// health answers decode strictly into Health, device_peers by public key
+// (an object, or null for an unreadable device: never confused).
+func TestHealthAnswerVectors(t *testing.T) {
+	b, err := os.ReadFile("testdata/nodeagent_call_vectors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f struct {
+		Answers []struct {
+			Name   string          `json:"name"`
+			Answer json.RawMessage `json:"answer"`
+		} `json:"health_answers"`
+	}
+	if err := json.Unmarshal(b, &f); err != nil || len(f.Answers) != 3 {
+		t.Fatalf("health_answers: %v (%d)", err, len(f.Answers))
+	}
+	for i, a := range f.Answers {
+		var h Health
+		if err := jsonstrict.Decode(a.Answer, &h); err != nil {
+			t.Fatalf("%s: %v", a.Name, err)
+		}
+		if (i == 2) == h.DevicePeers.Valid {
+			t.Errorf("%s: device_peers %+v", a.Name, h.DevicePeers)
+		}
+		for k, p := range h.DevicePeers.V {
+			if len(k) != 44 || len(p.AllowedIPs) == 0 {
+				t.Errorf("%s: device peer %q %+v", a.Name, k, p)
+			}
+		}
+	}
+}
